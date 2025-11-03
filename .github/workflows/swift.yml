@@ -1,0 +1,28 @@
+name: Swift
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: sh build.sh
+    
+    - name: Verify
+      run: |
+        ls -la MetalSlide.app/Contents/MacOS/
+        file MetalSlide.app/Contents/MacOS/MetalSlide
+    
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: MetalSlide-app
+        path: MetalSlide.app/
