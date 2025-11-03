@@ -97,8 +97,9 @@ class Renderer: NSObject, MTKViewDelegate {
                 for (int y = -radius; y <= radius; y++) {
                     for (int x = -radius; x <= radius; x++) {
                         float2 offset = float2(x, y);
-                        float2 samplePos = (floor(texelPos) + offset + 0.5) / texSize;
-                        float2 delta = texelPos - (floor(texelPos) + offset + 0.5);
+                        float2 centerPos = floor(texelPos) + offset + 0.5;
+                        float2 samplePos = centerPos / texSize;
+                        float2 delta = texelPos - centerPos;
                         float weight = lanczos(delta.x, 3.0) * lanczos(delta.y, 3.0);
 
                         constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);
@@ -123,7 +124,7 @@ class Renderer: NSObject, MTKViewDelegate {
         pipelineDesc.vertexFunctionDescriptor = vertDesc
         pipelineDesc.fragmentFunctionDescriptor = fragDesc
         pipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
-        pipeline = try! compiler.makeRenderPipelineState(descriptor: pipelineDesc, dynamicLinkingDescriptor: nil, compilerTaskOptions: nil)
+        pipeline = try! compiler.makeRenderPipelineState(descriptor: pipelineDesc)
 
         let tableDesc = MTL4ArgumentTableDescriptor()
         tableDesc.maxTextureBindCount = 1
