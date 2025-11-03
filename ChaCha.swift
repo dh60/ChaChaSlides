@@ -141,17 +141,22 @@ class Renderer: NSObject, MTKViewDelegate {
     func updateTexture() {
         guard device != nil,
               lastIndex != currentIndex,
-              let src = CGImageSourceCreateWithURL(imagePaths[currentIndex] as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return }
+              let src = CGImageSourceCreateWithURL(imagePaths[currentIndex] as CFURL, nil) else { return }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceShouldAllowFloat: true
+        ]
+        guard let cgImage = CGImageSourceCreateImageAtIndex(src, 0, options as CFDictionary) else { return }
 
         lastIndex = currentIndex
         let (width, height) = (cgImage.width, cgImage.height)
         imageSize = CGSize(width: width, height: height)
 
         var data = [UInt8](repeating: 0, count: width * height * 4)
-        CGContext(data: &data, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+        let context = CGContext(data: &data, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-            .draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         if texture?.width != width || texture?.height != height {
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
