@@ -79,9 +79,36 @@ class Renderer: NSObject, MTKViewDelegate {
                 float2 texCoords[6] = { float2(0,1), float2(1,1), float2(0,0), float2(0,0), float2(1,1), float2(1,0) };
                 return { float4(positions[vid] * scale, 0, 1), texCoords[vid] };
             }
+
+            float lanczos(float x, float a) {
+                if (x == 0.0) return 1.0;
+                if (abs(x) >= a) return 0.0;
+                float pi_x = M_PI_F * x;
+                return (a * sin(pi_x) * sin(pi_x / a)) / (pi_x * pi_x);
+            }
+
             fragment half4 fragmentShader(VertexOut in [[stage_in]], texture2d<half> tex [[texture(0)]]) {
-                constexpr sampler s(mag_filter::linear, min_filter::linear);
-                return tex.sample(s, in.texCoord);
+                float2 texSize = float2(tex.get_width(), tex.get_height());
+                float2 texelPos = in.texCoord * texSize;
+
+                half4 color = half4(0.0);
+                float totalWeight = 0.0;
+
+                const int radius = 3;
+                for (int y = -radius; y <= radius; y++) {
+                    for (int x = -radius; x <= radius; x++) {
+                        float2 offset = float2(x, y);
+                        float2 samplePos = (floor(texelPos) + offset + 0.5) / texSize;
+                        float2 delta = texelPos - (floor(texelPos) + offset + 0.5);
+                        float weight = lanczos(delta.x, 3.0) * lanczos(delta.y, 3.0);
+
+                        constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);
+                        color += tex.sample(s, samplePos) * weight;
+                        totalWeight += weight;
+                    }
+                }
+
+                return color / totalWeight;
             }
             """, options: nil)
 
@@ -196,19 +223,19 @@ class Renderer: NSObject, MTKViewDelegate {
             ? CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
             : CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
 
-        let (renderTexture, renderSize): (MTLTexture, CGSize)
+        let renderTexture: MTLTexture
         if let scaler = spatialScaler, let output = scalerOutput {
             scaler.colorTexture = inputTexture
             scaler.outputTexture = output
             scaler.inputContentWidth = inputTexture.width
             scaler.inputContentHeight = inputTexture.height
-            (renderTexture, renderSize) = (output, CGSize(width: output.width, height: output.height))
+            renderTexture = output
         } else {
-            (renderTexture, renderSize) = (inputTexture, fitSize)
+            renderTexture = inputTexture
         }
 
         let scalePtr = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
-        (scalePtr[0], scalePtr[1]) = (Float(renderSize.width / viewportSize.width), Float(renderSize.height / viewportSize.height))
+        (scalePtr[0], scalePtr[1]) = (Float(fitSize.width / viewportSize.width), Float(fitSize.height / viewportSize.height))
 
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)
