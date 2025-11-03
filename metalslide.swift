@@ -236,7 +236,6 @@ class Renderer: NSObject, MTKViewDelegate {
         argumentTable.setTexture(renderTexture.gpuResourceID, index: 0)
         argumentTable.setAddress(scaleBuffer.gpuAddress, index: 0)
 
-        allocator.reset()
         commandBuffer.beginCommandBuffer(allocator: allocator)
         commandBuffer.useResidencySet(residencySet)
 
@@ -253,6 +252,7 @@ class Renderer: NSObject, MTKViewDelegate {
         queue.commit([commandBuffer], options: nil)
         queue.signalDrawable(drawable)
         drawable.present()
+        allocator.reset()
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
