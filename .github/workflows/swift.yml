@@ -8,20 +8,19 @@ on:
 
 jobs:
   build:
-
     runs-on: macos-latest
 
     steps:
     - uses: actions/checkout@v4
+    
     - name: Build
       run: sh build.sh
+      
+    - name: Create DMG
+      run: hdiutil create -volname "MetalSlide" -srcfolder MetalSlide.app -ov -format UDZO MetalSlide.dmg
     
-    - name: Verify
-      run: |
-        ls -la MetalSlide.app/Contents/MacOS/
-        file MetalSlide.app/Contents/MacOS/MetalSlide
-    
-    - name: Upload
+    - name: Upload DMG
       uses: actions/upload-artifact@v4
       with:
-        name: MetalSlide.app
+        name: MetalSlide
+        path: MetalSlide.dmg
