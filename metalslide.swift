@@ -50,7 +50,7 @@ class Renderer: NSObject, MTKViewDelegate {
     var lastIndex = -1
     var device: MTLDevice!
     var queue: MTL4CommandQueue!
-    var pipeline: MTLRenderPipelineState!
+    var pipeline: MTLRenderPipelineState?
     var allocator: MTL4CommandAllocator!
     var argumentTable: MTL4ArgumentTable!
     var residencySet: MTLResidencySet!
@@ -63,13 +63,28 @@ class Renderer: NSObject, MTKViewDelegate {
     var lastViewportSize = CGSize.zero
     var scalerFence: MTLFence!
     var commandBuffer: MTL4CommandBuffer!
+    var preloadedTextures: [Int: MTLTexture] = [:]
+    var preloadedScalers: [Int: (MTL4FXSpatialScaler, MTLTexture)] = [:]
+    var preloadQueue = DispatchQueue(label: "preload", qos: .userInitiated)
+    var pipelineReady = false
 
     func initializeMetal(_ view: MTKView) {
         device = view.device
         queue = device.makeMTL4CommandQueue()
         compiler = try! device.makeCompiler(descriptor: MTL4CompilerDescriptor())
 
-        let library = try! device.makeLibrary(source: """
+        let tableDesc = MTL4ArgumentTableDescriptor()
+        tableDesc.maxTextureBindCount = 1
+        tableDesc.maxBufferBindCount = 1
+        argumentTable = try! device.makeArgumentTable(descriptor: tableDesc)
+
+        scaleBuffer = device.makeBuffer(length: 8, options: .storageModeShared)
+        residencySet = try! device.makeResidencySet(descriptor: MTLResidencySetDescriptor())
+        allocator = device.makeCommandAllocator()
+        scalerFence = device.makeFence()
+        commandBuffer = device.makeCommandBuffer()
+
+        let shaderSource = """
             #include <metal_stdlib>
             using namespace metal;
             struct VertexOut { float4 position [[position]]; float2 texCoord; };
@@ -110,49 +125,40 @@ class Renderer: NSObject, MTKViewDelegate {
 
                 return color / totalWeight;
             }
-            """, options: {
-            let o = MTLCompileOptions()
-            o.mathMode = .fast
-            return o
-        }())
+            """
+        let options = MTLCompileOptions()
+        options.mathMode = .fast
 
-        let vertDesc = MTL4LibraryFunctionDescriptor()
-        vertDesc.name = "vertexShader"
-        vertDesc.library = library
+        device.makeLibrary(source: shaderSource, options: options) { [weak self] library, error in
+            guard let self = self, let library = library else { return }
 
-        let fragDesc = MTL4LibraryFunctionDescriptor()
-        fragDesc.name = "fragmentShader"
-        fragDesc.library = library
+            let vertDesc = MTL4LibraryFunctionDescriptor()
+            vertDesc.name = "vertexShader"
+            vertDesc.library = library
 
-        let pipelineDesc = MTL4RenderPipelineDescriptor()
-        pipelineDesc.vertexFunctionDescriptor = vertDesc
-        pipelineDesc.fragmentFunctionDescriptor = fragDesc
-        pipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
-        pipeline = try! compiler.makeRenderPipelineState(descriptor: pipelineDesc)
+            let fragDesc = MTL4LibraryFunctionDescriptor()
+            fragDesc.name = "fragmentShader"
+            fragDesc.library = library
 
-        let tableDesc = MTL4ArgumentTableDescriptor()
-        tableDesc.maxTextureBindCount = 1
-        tableDesc.maxBufferBindCount = 1
-        argumentTable = try! device.makeArgumentTable(descriptor: tableDesc)
+            let pipelineDesc = MTL4RenderPipelineDescriptor()
+            pipelineDesc.vertexFunctionDescriptor = vertDesc
+            pipelineDesc.fragmentFunctionDescriptor = fragDesc
+            pipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
 
-        scaleBuffer = device.makeBuffer(length: 8, options: .storageModeShared)
-        residencySet = try! device.makeResidencySet(descriptor: MTLResidencySetDescriptor())
-        allocator = device.makeCommandAllocator()
-        scalerFence = device.makeFence()
-        commandBuffer = device.makeCommandBuffer()
+            Task {
+                do {
+                    self.pipeline = try await self.compiler.makeRenderPipelineState(descriptor: pipelineDesc)
+                    self.pipelineReady = true
+                    await MainActor.run { self.view?.needsDisplay = true }
+                } catch {}
+            }
+        }
     }
 
-    func updateTexture() {
-        guard device != nil,
-              lastIndex != currentIndex,
-              let src = CGImageSourceCreateWithURL(imagePaths[currentIndex] as CFURL, nil) else { return }
+    func loadTexture(index: Int) -> MTLTexture? {
+        guard let src = CGImageSourceCreateWithURL(imagePaths[index] as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldAllowFloat: true] as CFDictionary) else { return nil }
 
-        let options: [CFString: Any] = [
-            kCGImageSourceShouldAllowFloat: true
-        ]
-        guard let cgImage = CGImageSourceCreateImageAtIndex(src, 0, options as CFDictionary) else { return }
-
-        lastIndex = currentIndex
         let (width, height) = (cgImage.width, cgImage.height)
         var data = [UInt8](repeating: 0, count: width * height * 4)
         let context = CGContext(data: &data, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
@@ -160,27 +166,95 @@ class Renderer: NSObject, MTKViewDelegate {
         context.interpolationQuality = .none
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        if texture?.width != width || texture?.height != height {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
-            desc.usage = .shaderRead
-            texture = device.makeTexture(descriptor: desc)
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+        desc.usage = .shaderRead
+        guard let tex = device.makeTexture(descriptor: desc) else { return nil }
+        tex.replace(region: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: width, height: height, depth: 1)),
+                   mipmapLevel: 0, withBytes: data, bytesPerRow: width * 4)
+        return tex
+    }
+
+    func preloadAdjacentImages() {
+        guard let view = view else { return }
+        let viewportSize = CGSize(width: view.drawableSize.width, height: view.drawableSize.height)
+        let next = (currentIndex + 1) % imagePaths.count
+        let prev = (currentIndex - 1 + imagePaths.count) % imagePaths.count
+
+        preloadQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            for index in [next, prev] {
+                if self.preloadedTextures[index] == nil, let tex = self.loadTexture(index: index) {
+                    self.preloadedTextures[index] = tex
+
+                    let imageAspect = CGFloat(tex.width) / CGFloat(tex.height)
+                    let viewportAspect = viewportSize.width / viewportSize.height
+                    let fitSize = imageAspect > viewportAspect
+                        ? CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
+                        : CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
+                    let (outputWidth, outputHeight) = (Int(fitSize.width), Int(fitSize.height))
+
+                    if outputWidth > tex.width || outputHeight > tex.height,
+                       MTLFXSpatialScalerDescriptor.supportsDevice(self.device) {
+                        let desc = MTLFXSpatialScalerDescriptor()
+                        desc.inputWidth = tex.width
+                        desc.inputHeight = tex.height
+                        desc.outputWidth = outputWidth
+                        desc.outputHeight = outputHeight
+                        desc.colorTextureFormat = .rgba8Unorm
+                        desc.outputTextureFormat = .rgba8Unorm
+                        desc.colorProcessingMode = .perceptual
+
+                        if let scaler = desc.makeSpatialScaler(device: self.device, compiler: self.compiler) {
+                            scaler.fence = self.scalerFence
+                            let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: outputWidth, height: outputHeight, mipmapped: false)
+                            outDesc.usage = scaler.outputTextureUsage
+                            if let output = self.device.makeTexture(descriptor: outDesc) {
+                                self.preloadedScalers[index] = (scaler, output)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func updateTexture() {
+        guard device != nil, lastIndex != currentIndex else { return }
+        lastIndex = currentIndex
+
+        if let preloaded = preloadedTextures[currentIndex] {
+            texture = preloaded
+            preloadedTextures.removeValue(forKey: currentIndex)
+
+            if let (scaler, output) = preloadedScalers[currentIndex] {
+                spatialScaler = scaler
+                scalerOutput = output
+                preloadedScalers.removeValue(forKey: currentIndex)
+            } else {
+                spatialScaler = nil
+            }
+        } else {
+            texture = loadTexture(index: currentIndex)
             spatialScaler = nil
         }
 
-        texture?.replace(region: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: width, height: height, depth: 1)),
-                        mipmapLevel: 0, withBytes: data, bytesPerRow: width * 4)
+        preloadedTextures.removeAll()
+        preloadedScalers.removeAll()
+        preloadAdjacentImages()
     }
 
     func draw(in view: MTKView) {
         guard !imagePaths.isEmpty else { return }
 
-        if pipeline == nil {
-            initializeMetal(view)
+        if !pipelineReady {
+            if pipeline == nil { initializeMetal(view) }
+            return
         }
 
         updateTexture()
 
-        guard let drawable = view.currentDrawable, let inputTexture = texture else { return }
+        guard let drawable = view.currentDrawable, let inputTexture = texture, let pipeline = pipeline else { return }
 
         let viewportSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
         let imageAspect = CGFloat(inputTexture.width) / CGFloat(inputTexture.height)
