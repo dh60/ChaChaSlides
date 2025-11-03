@@ -1,16 +1,16 @@
 #!/bin/bash
 
 # Clean build
-rm -rf ChaCha.app
+rm -rf MetalSlide.app
 
 # Create the app bundle structure first
-mkdir -p ChaCha.app/Contents/MacOS
+mkdir -p MetalSlide.app/Contents/MacOS
 
 # Compile the Swift code
-swiftc ChaCha.swift -o ChaCha.app/Contents/MacOS/ChaCha -framework SwiftUI -framework Metal -framework MetalKit -framework MetalFX -parse-as-library
+swiftc MetalSlide.swift -o MetalSlide.app/Contents/MacOS/MetalSlide -framework SwiftUI -framework Metal -framework MetalKit -framework MetalFX -parse-as-library
 
 # Create Info.plist
-cat << EOF > ChaCha.app/Contents/Info.plist
+cat << EOF > MetalSlide.app/Contents/Info.plist
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -18,9 +18,9 @@ cat << EOF > ChaCha.app/Contents/Info.plist
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>ChaCha</string>
+    <string>MetalSlide</string>
     <key>CFBundleIdentifier</key>
-    <string>com.dh60.ChaCha</string>
+    <string>com.dh60.MetalSlide</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
