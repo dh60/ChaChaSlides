@@ -238,8 +238,6 @@ class Renderer: NSObject, MTKViewDelegate {
             currentIndex = (currentIndex + 1) % imagePaths.count
         case 51:
             try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
-            currentIndex = (currentIndex + 1) % imagePaths.count
-            imagePaths.remove(at: currentIndex - 1)
         default: break
         }
     }
