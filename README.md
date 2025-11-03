@@ -12,5 +12,5 @@ MetalSlide is a minimalist slideshow app for MacOS that uses Metal for high qual
 - Select your folder.
 - Right Arrow / Spacebar = Next
 - Left Arrow = Previous
-- Delete = Delete Photo (to Trash)
+- Delete = Trash Image
 - Esc = Exit
