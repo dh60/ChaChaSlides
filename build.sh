@@ -1,5 +1,3 @@
-#!/bin/bash
-
 # Clean build
 rm -rf MetalSlide.app
 
