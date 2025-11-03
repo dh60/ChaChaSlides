@@ -25,6 +25,7 @@ struct MetalView: NSViewRepresentable {
             .map { $0 as! URL }
             .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension) }
             .shuffled()
+        context.coordinator.lastIndex = -1
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
         view.delegate = context.coordinator
