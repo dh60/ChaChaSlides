@@ -5,66 +5,30 @@ import MetalFX
 
 @main
 struct ChaCha: App {
-    @StateObject private var state = AppState()
-
     var body: some Scene {
-        WindowGroup {
-            if state.folderSelected {
-                MetalView(state: state)
-                    .ignoresSafeArea()
-            } else {
-                Color.clear
-                    .frame(width: 1, height: 1)
-                    .task { state.pickFolder() }
-            }
+        Window("ChaCha", id: "main") {
+            MetalView()
         }
-    }
-}
-
-final class AppState: ObservableObject {
-    @Published var folderSelected = false
-    @Published var currentIndex = 0
-    var imagePaths: [URL] = []
-
-    func pickFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        guard panel.runModal() == .OK, let url = panel.url else {
-            NSApp.terminate(nil)
-            return
-        }
-
-        if let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil) {
-            for case let file as URL in files where ["jpg", "jpeg", "png"].contains(file.pathExtension.lowercased()) {
-                imagePaths.append(file)
-            }
-        }
-
-        imagePaths.shuffle()
-        folderSelected = true
-    }
-
-    func next() { currentIndex = (currentIndex + 1) % imagePaths.count }
-    func previous() { currentIndex = (currentIndex - 1 + imagePaths.count) % imagePaths.count }
-    func deleteCurrent() {
-        try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
-        imagePaths.remove(at: currentIndex)
-        if imagePaths.isEmpty { NSApp.terminate(nil) }
-        if currentIndex >= imagePaths.count { currentIndex = 0 }
     }
 }
 
 struct MetalView: NSViewRepresentable {
-    @ObservedObject var state: AppState
-
-    func makeCoordinator() -> Renderer { Renderer(state: state) }
+    func makeCoordinator() -> Renderer { Renderer() }
 
     func makeNSView(context: Context) -> MTKView {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.runModal()
+        let url = panel.url!
+        context.coordinator.imagePaths = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil)!.allObjects
+            .map { $0 as! URL }
+            .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension) }
+            .shuffled()
+
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
         view.delegate = context.coordinator
-        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         view.framebufferOnly = false
         view.isPaused = true
         view.enableSetNeedsDisplay = true
@@ -77,12 +41,12 @@ struct MetalView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: MTKView, context: Context) {
-        context.coordinator.updateTexture()
     }
 }
 
 class Renderer: NSObject, MTKViewDelegate {
-    let state: AppState
+    var currentIndex = 0
+    var imagePaths: [URL] = []
     var device: MTLDevice!
     var queue: MTL4CommandQueue!
     var pipeline: MTLRenderPipelineState!
@@ -99,8 +63,6 @@ class Renderer: NSObject, MTKViewDelegate {
     var scalerOutput: MTLTexture?
     var lastViewportSize = CGSize.zero
     var scalerFence: MTLFence!
-
-    init(state: AppState) { self.state = state }
 
     func initializeMetal(_ view: MTKView) {
         device = view.device
@@ -149,11 +111,11 @@ class Renderer: NSObject, MTKViewDelegate {
 
     func updateTexture() {
         guard device != nil,
-              lastIndex != state.currentIndex,
-              let src = CGImageSourceCreateWithURL(state.imagePaths[state.currentIndex] as CFURL, nil),
+              lastIndex != currentIndex,
+              let src = CGImageSourceCreateWithURL(imagePaths[currentIndex] as CFURL, nil),
               let cgImage = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return }
 
-        lastIndex = state.currentIndex
+        lastIndex = currentIndex
         let (width, height) = (cgImage.width, cgImage.height)
         imageSize = CGSize(width: width, height: height)
 
@@ -210,10 +172,13 @@ class Renderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        guard !imagePaths.isEmpty else { return }
+
         if pipeline == nil {
             initializeMetal(view)
-            updateTexture()
         }
+
+        updateTexture()
 
         guard let drawable = view.currentDrawable, let inputTexture = texture else { return }
 
@@ -254,13 +219,7 @@ class Renderer: NSObject, MTKViewDelegate {
 
         spatialScaler?.encode(commandBuffer: commandBuffer)
 
-        let passDesc = MTL4RenderPassDescriptor()
-        passDesc.colorAttachments[0]!.texture = drawable.texture
-        passDesc.colorAttachments[0]!.loadAction = .clear
-        passDesc.colorAttachments[0]!.storeAction = .store
-        passDesc.colorAttachments[0]!.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-
-        let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDesc, options: MTL4RenderEncoderOptions())!
+        let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: view.currentMTL4RenderPassDescriptor!, options: MTL4RenderEncoderOptions())!
         if spatialScaler != nil { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
         encoder.setRenderPipelineState(pipeline)
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
@@ -278,10 +237,18 @@ class Renderer: NSObject, MTKViewDelegate {
     func handleKey(_ event: NSEvent) {
         switch event.keyCode {
         case 53: NSApp.terminate(nil)
-        case 12 where event.modifierFlags.contains(.command): NSApp.terminate(nil)
-        case 123: state.previous()
-        case 124, 49: state.next()
-        case 51: state.deleteCurrent()
+        case 123:
+            currentIndex = (currentIndex - 1 + imagePaths.count) % imagePaths.count
+            view?.needsDisplay = true
+        case 124, 49:
+            currentIndex = (currentIndex + 1) % imagePaths.count
+            view?.needsDisplay = true
+        case 51:
+            try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
+            imagePaths.remove(at: currentIndex)
+            if imagePaths.isEmpty { NSApp.terminate(nil) }
+            if currentIndex >= imagePaths.count { currentIndex = 0 }
+            view?.needsDisplay = true
         default: break
         }
     }
