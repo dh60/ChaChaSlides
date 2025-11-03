@@ -69,6 +69,9 @@ class Renderer: NSObject, MTKViewDelegate {
         queue = device.makeMTL4CommandQueue()
         compiler = try! device.makeCompiler(descriptor: MTL4CompilerDescriptor())
 
+        let compileOptions = MTLCompileOptions()
+        compileOptions.mathMode = .fast
+
         let library = try! device.makeLibrary(source: """
             #include <metal_stdlib>
             using namespace metal;
@@ -110,7 +113,7 @@ class Renderer: NSObject, MTKViewDelegate {
 
                 return color / totalWeight;
             }
-            """, options: nil)
+            """, options: compileOptions)
 
         let vertDesc = MTL4LibraryFunctionDescriptor()
         vertDesc.name = "vertexShader"
@@ -153,7 +156,7 @@ class Renderer: NSObject, MTKViewDelegate {
         var data = [UInt8](repeating: 0, count: width * height * 4)
         let context = CGContext(data: &data, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        context.interpolationQuality = .high
+        context.interpolationQuality = .none
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         if texture?.width != width || texture?.height != height {
