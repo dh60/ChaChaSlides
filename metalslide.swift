@@ -69,9 +69,6 @@ class Renderer: NSObject, MTKViewDelegate {
         queue = device.makeMTL4CommandQueue()
         compiler = try! device.makeCompiler(descriptor: MTL4CompilerDescriptor())
 
-        let compileOptions = MTLCompileOptions()
-        compileOptions.mathMode = .fast
-
         let library = try! device.makeLibrary(source: """
             #include <metal_stdlib>
             using namespace metal;
@@ -113,7 +110,11 @@ class Renderer: NSObject, MTKViewDelegate {
 
                 return color / totalWeight;
             }
-            """, options: compileOptions)
+            """, options: {
+            let o = MTLCompileOptions()
+            o.mathMode = .fast
+            return o
+        }())
 
         let vertDesc = MTL4LibraryFunctionDescriptor()
         vertDesc.name = "vertexShader"
