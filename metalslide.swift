@@ -20,9 +20,9 @@ struct MetalView: View {
             MetalViewRepresentable(renderer: renderer)
             if renderer.showInfo {
                 Text(renderer.info)
-                    .background(Color.black.opacity(0.5))
-                    .cornerRadius(4)
-                    .padding(12)
+                    .padding()
+                    .glassEffect(in: .rect(cornerRadius: 30))
+                    .padding()
             }
         }
     }
@@ -333,7 +333,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         let pipeline = spatialScaler != nil ? upscalePipeline! : downscalePipeline!
         let scalingMode = spatialScaler != nil ? "Upscale: MetalFX" : "Downscale: Lanczos"
 
-        info = "File: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(Int(fitSize.width))x\(Int(fitSize.height))\n\(scalingMode)"
+        info = "Slide: \(currentIndex + 1) of \(imagePaths.count)\nFile: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(Int(fitSize.width))x\(Int(fitSize.height))\n\(scalingMode)"
 
         let scale = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
         (scale[0], scale[1]) = (Float(fitSize.width / viewportSize.width), Float(fitSize.height / viewportSize.height))
