@@ -322,22 +322,18 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
             }
         }
 
-        let useMetalFX = spatialScaler != nil && scalerOutput != nil
-        let renderTexture = useMetalFX ? scalerOutput! : inputTexture
-        let pipeline = useMetalFX ? upscalePipeline! : downscalePipeline!
-
-        if useMetalFX, let scaler = spatialScaler {
+        if let scaler = spatialScaler, let output = scalerOutput {
             scaler.colorTexture = inputTexture
-            scaler.outputTexture = renderTexture
+            scaler.outputTexture = output
             scaler.inputContentWidth = inputTexture.width
             scaler.inputContentHeight = inputTexture.height
         }
 
-        let scalingMode = useMetalFX ? "Upscale: MetalFX" : "Downscale: Lanczos"
-        let inputRes = "\(inputTexture.width)x\(inputTexture.height)"
-        let outputRes = "\(Int(fitSize.width))x\(Int(fitSize.height))"
-        let fileName = imagePaths[currentIndex].lastPathComponent
-        info = "File: \(fileName)\nInput: \(inputRes)\nOutput: \(outputRes)\n\(scalingMode)"
+        let renderTexture = spatialScaler != nil ? scalerOutput! : inputTexture
+        let pipeline = spatialScaler != nil ? upscalePipeline! : downscalePipeline!
+        let scalingMode = spatialScaler != nil ? "Upscale: MetalFX" : "Downscale: Lanczos"
+
+        info = "File: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(Int(fitSize.width))x\(Int(fitSize.height))\n\(scalingMode)"
 
         let scale = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
         (scale[0], scale[1]) = (Float(fitSize.width / viewportSize.width), Float(fitSize.height / viewportSize.height))
@@ -345,7 +341,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)
         residencySet.addAllocation(scaleBuffer)
-        if useMetalFX { residencySet.addAllocation(renderTexture) }
+        if renderTexture !== inputTexture { residencySet.addAllocation(renderTexture) }
         residencySet.commit()
 
         argumentTable.setTexture(renderTexture.gpuResourceID, index: 0)
@@ -354,10 +350,10 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         commandBuffer.beginCommandBuffer(allocator: allocator)
         commandBuffer.useResidencySet(residencySet)
 
-        if useMetalFX { spatialScaler?.encode(commandBuffer: commandBuffer) }
+        spatialScaler?.encode(commandBuffer: commandBuffer)
 
         let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: view.currentMTL4RenderPassDescriptor!, options: MTL4RenderEncoderOptions())!
-        if useMetalFX { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
+        if spatialScaler != nil { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
         encoder.setRenderPipelineState(pipeline)
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6)
