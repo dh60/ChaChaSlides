@@ -1,11 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 # Clean build
 rm -rf MetalSlide.app
 
 # Create the app bundle structure first
 mkdir -p MetalSlide.app/Contents/MacOS
 
-# Compile the Swift code
-swiftc MetalSlide.swift -o MetalSlide.app/Contents/MacOS/MetalSlide -framework SwiftUI -framework Metal -framework MetalKit -framework MetalFX -parse-as-library
+# Compile the Swift code (optimized — swiftc defaults to -Onone)
+swiftc metalslide.swift -O -o MetalSlide.app/Contents/MacOS/MetalSlide -framework SwiftUI -framework Metal -framework MetalKit -framework MetalFX -parse-as-library
 
 # Create Info.plist
 cat << EOF > MetalSlide.app/Contents/Info.plist
@@ -31,6 +34,6 @@ cat << EOF > MetalSlide.app/Contents/Info.plist
 </plist>
 EOF
 
-codesign --force --deep --sign - MetalSlide.app
+codesign --force --sign - MetalSlide.app
 
 echo "Build complete!"
