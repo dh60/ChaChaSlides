@@ -6,7 +6,7 @@ A slideshow app for macOS using Metal 4 and MetalFX for high quality image viewi
 - JPEG, PNG, HEIC/HEIF, TIFF, WebP, AVIF, GIF, BMP — with EXIF orientation
 - HDR photos (gain map / PQ / HLG) rendered with EDR headroom
 - Metal 4 pipeline with native rendering (no OS scaling)
-- MetalFX upscaling
+- MetalFX upscaling; ewa_lanczossharp for downscaling
 - Auto-advance timer
 - Settings (scaling, shuffle, auto-advance) persist between runs
 ## Keybinds

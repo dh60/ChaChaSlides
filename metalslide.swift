@@ -122,6 +122,8 @@ class Renderer: NSObject, MTKViewDelegate {
     var device: MTLDevice!
     var queue: MTL4CommandQueue!
     var pipeline: MTLRenderPipelineState?
+    var pipelineEWA: MTLRenderPipelineState?
+    var kernelLUT: MTLTexture!
     var allocator: MTL4CommandAllocator!
     var argumentTable: MTL4ArgumentTable!
     var residencySet: MTLResidencySet!
@@ -163,11 +165,12 @@ class Renderer: NSObject, MTKViewDelegate {
         compiler = try! device.makeCompiler(descriptor: MTL4CompilerDescriptor())
 
         let tableDesc = MTL4ArgumentTableDescriptor()
-        tableDesc.maxTextureBindCount = 1
+        tableDesc.maxTextureBindCount = 2
         tableDesc.maxBufferBindCount = 1
         argumentTable = try! device.makeArgumentTable(descriptor: tableDesc)
 
-        scaleBuffer = device.makeBuffer(length: 8, options: .storageModeShared)
+        // Uniforms: float2 quadScale + float ratio (+ pad).
+        scaleBuffer = device.makeBuffer(length: 16, options: .storageModeShared)
         residencySet = try! device.makeResidencySet(descriptor: .init())
         allocator = device.makeCommandAllocator()
         scalerFence = device.makeFence()
@@ -180,6 +183,31 @@ class Renderer: NSObject, MTKViewDelegate {
             goToSlide(currentIndex + 1)
         }
 
+        // ewa_lanczossharp kernel LUT (libplacebo, same as MetalFrame): jinc *
+        // jinc-window with a 0.98125 blur factor, 3rd jinc zero as support,
+        // precomputed into a 1D LUT indexed by r / maxR ∈ [0, 1].
+        let lutSize = 512
+        let kernelRadius = 3.2383154841662362
+        let blur = 0.98125058372237073
+        let maxR = kernelRadius * blur
+        func jinc(_ x: Double) -> Double {
+            if abs(x) < 1e-8 { return 1.0 }
+            return 2.0 * j1(.pi * x) / (.pi * x)
+        }
+        var lutData = [Float](repeating: 0, count: lutSize)
+        for i in 0..<lutSize {
+            let r = (Double(i) / Double(lutSize - 1)) * maxR
+            let rPrime = r / blur
+            lutData[i] = rPrime >= kernelRadius ? 0 : Float(jinc(rPrime) * jinc(rPrime / kernelRadius))
+        }
+        let lutDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: lutSize, height: 1, mipmapped: false)
+        lutDesc.usage = .shaderRead
+        lutDesc.storageMode = .shared
+        kernelLUT = device.makeTexture(descriptor: lutDesc)
+        lutData.withUnsafeBytes { bytes in
+            kernelLUT.replace(region: MTLRegionMake2D(0, 0, lutSize, 1), mipmapLevel: 0, withBytes: bytes.baseAddress!, bytesPerRow: lutSize * MemoryLayout<Float>.size)
+        }
+
         let shaderSource = """
             #include <metal_stdlib>
             using namespace metal;
@@ -189,7 +217,9 @@ class Renderer: NSObject, MTKViewDelegate {
                 float2 texCoord;
             };
 
-            vertex VertexOut vertexShader(uint vid [[vertex_id]], constant float2 &scale [[buffer(0)]]) {
+            struct Uniforms { float2 scale; float ratio; };
+
+            vertex VertexOut vertexShader(uint vid [[vertex_id]], constant Uniforms &u [[buffer(0)]]) {
                 float2 positions[6] = {
                     float2(-1,-1), float2(1,-1), float2(-1,1),
                     float2(-1,1), float2(1,-1), float2(1,1)
@@ -198,7 +228,7 @@ class Renderer: NSObject, MTKViewDelegate {
                     float2(0,1), float2(1,1), float2(0,0),
                     float2(0,0), float2(1,1), float2(1,0)
                 };
-                return { float4(positions[vid] * scale, 0, 1), texCoords[vid] };
+                return { float4(positions[vid] * u.scale, 0, 1), texCoords[vid] };
             }
 
             fragment half4 fragmentShader(VertexOut in [[stage_in]], texture2d<half> tex [[texture(0)]]) {
@@ -206,6 +236,49 @@ class Renderer: NSObject, MTKViewDelegate {
                                    address::clamp_to_edge,
                                    filter::linear);
                 return tex.sample(s, in.texCoord);
+            }
+
+            // ewa_lanczossharp (libplacebo), same kernel as MetalFrame. Input is
+            // already linear light and the layer is linear-tagged, so unlike
+            // MetalFrame no transfer-function round trip is needed. At ratio == 1
+            // the kernel collapses to its natural support; downscale ratios widen
+            // it to low-pass at the output Nyquist.
+            fragment half4 fragmentShaderEWA(VertexOut in [[stage_in]],
+                                              texture2d<half> tex [[texture(0)]],
+                                              texture2d<float> kernelLUT [[texture(1)]],
+                                              constant Uniforms &u [[buffer(0)]]) {
+                constexpr sampler texSampler(coord::pixel, address::clamp_to_edge, filter::nearest);
+                constexpr sampler lutSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+                constexpr float kernelRadius = 3.2383154841662362;
+                constexpr float blur = 0.98125058372237073;
+                constexpr float maxR = kernelRadius * blur;
+
+                float ratio = max(u.ratio, 1.0);
+                int taps = min(int(ceil(maxR * ratio)), 20);
+
+                float texW = float(tex.get_width());
+                float texH = float(tex.get_height());
+                float cx = in.texCoord.x * texW;
+                float cy = in.texCoord.y * texH;
+                int baseX = int(floor(cx - 0.5));
+                int baseY = int(floor(cy - 0.5));
+
+                float4 sum = float4(0);
+                float wSum = 0;
+                for (int j = -taps + 1; j <= taps; ++j) {
+                    float sy = float(baseY + j) + 0.5;
+                    float dy = (sy - cy) / ratio;
+                    for (int i = -taps + 1; i <= taps; ++i) {
+                        float sx = float(baseX + i) + 0.5;
+                        float dx = (sx - cx) / ratio;
+                        float r = sqrt(dx * dx + dy * dy);
+                        if (r >= maxR) continue;
+                        float w = kernelLUT.sample(lutSampler, float2(r / maxR, 0.5)).x;
+                        sum += w * float4(tex.sample(texSampler, float2(sx, sy)));
+                        wSum += w;
+                    }
+                }
+                return half4(sum / max(wSum, 1e-6));
             }
             """
 
@@ -231,6 +304,13 @@ class Renderer: NSObject, MTKViewDelegate {
                 }()
                 desc.colorAttachments[0].pixelFormat = pixelFormat
                 pipeline = try await compiler.makeRenderPipelineState(descriptor: desc)
+                desc.fragmentFunctionDescriptor = {
+                    let d = MTL4LibraryFunctionDescriptor()
+                    d.name = "fragmentShaderEWA"
+                    d.library = library
+                    return d
+                }()
+                pipelineEWA = try await compiler.makeRenderPipelineState(descriptor: desc)
                 await MainActor.run { self.view?.needsDisplay = true }
             } catch {
                 print("Shader compilation error: \(error.localizedDescription)")
@@ -296,7 +376,7 @@ class Renderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
-        guard let pipeline, let drawable = view.currentDrawable,
+        guard let pipeline, let pipelineEWA, let drawable = view.currentDrawable,
               let passDescriptor = view.currentMTL4RenderPassDescriptor else { return }
 
         // Reusing the single command buffer / allocator is only safe once the GPU
@@ -379,10 +459,14 @@ class Renderer: NSObject, MTKViewDelegate {
             }
         }
 
+        // EWA runs whenever we sample the source ourselves (no MetalFX): the
+        // downscale path proper, and the upscale fallback when Metal4FX is
+        // unavailable. Scaling off is 1:1 in pixel space — bilinear suffices.
+        let useEWA = scalingEnabled && scaler == nil
         let scalingMode = !scalingEnabled ? ""
             : scaler != nil ? "\nUpscaling: MetalFX"
-            : needsUpscale ? "\nUpscaling: Linear"
-            : "\nDownscaling: Linear"
+            : needsUpscale ? "\nUpscaling: ewa_lanczossharp"
+            : "\nDownscaling: ewa_lanczossharp"
 
         if let (s, output) = scaler {
             s.colorTexture = inputTexture
@@ -398,20 +482,23 @@ class Renderer: NSObject, MTKViewDelegate {
             Output: \(Int(displaySize.width))x\(Int(displaySize.height))\(scalingMode)
             """
 
-        scaleBuffer.contents()
-            .assumingMemoryBound(to: SIMD2<Float>.self)
-            .pointee = SIMD2(Float(displaySize.width / viewportSize.width),
-                            Float(displaySize.height / viewportSize.height))
+        let u = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
+        u[0] = Float(displaySize.width / viewportSize.width)
+        u[1] = Float(displaySize.height / viewportSize.height)
+        u[2] = useEWA ? Float(max(CGFloat(inputTexture.width) / max(fitSize.width, 1),
+                                  CGFloat(inputTexture.height) / max(fitSize.height, 1))) : 1
 
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)
         residencySet.addAllocation(scaleBuffer)
+        residencySet.addAllocation(kernelLUT)
         if let (_, output) = scaler { residencySet.addAllocation(output) }
         residencySet.commit()
 
         let finalTexture = scaler?.1 ?? inputTexture
 
         argumentTable.setTexture(finalTexture.gpuResourceID, index: 0)
+        if useEWA { argumentTable.setTexture(kernelLUT.gpuResourceID, index: 1) }
         argumentTable.setAddress(scaleBuffer.gpuAddress, index: 0)
 
         commandBuffer.beginCommandBuffer(allocator: allocator)
@@ -423,7 +510,7 @@ class Renderer: NSObject, MTKViewDelegate {
             options: MTL4RenderEncoderOptions()) else { return }
 
         encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment)
-        encoder.setRenderPipelineState(pipeline)
+        encoder.setRenderPipelineState(useEWA ? pipelineEWA : pipeline)
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
