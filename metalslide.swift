@@ -424,6 +424,8 @@ class Renderer: NSObject, MTKViewDelegate {
         // expect values beyond [0, 1].
         let colorMode: MTLFXSpatialScalerColorProcessingMode = textureIsHDR ? .hdr : .linear
 
+        var scalerRebuilt = false
+
         // Scalers are expensive to build (pipeline compilation), so keep the current
         // one unless the geometry or color mode changed. Replacing here is safe: the
         // event wait above guarantees the old scaler is no longer executing.
@@ -453,8 +455,12 @@ class Renderer: NSObject, MTKViewDelegate {
                     height: Int(fitSize.height),
                     mipmapped: false)
                 outDesc.usage = s.outputTextureUsage
+                // MTLFXSpatialScaler.h: the output texture must use private
+                // storage. (The macOS default is managed.)
+                outDesc.storageMode = .private
                 if let outTex = device.makeTexture(descriptor: outDesc) {
                     scaler = (s, outTex)
+                    scalerRebuilt = true
                 }
             }
         }
@@ -504,6 +510,13 @@ class Renderer: NSObject, MTKViewDelegate {
         commandBuffer.beginCommandBuffer(allocator: allocator)
         commandBuffer.useResidencySet(residencySet)
         scaler?.0.encode(commandBuffer: commandBuffer)
+        // A freshly created scaler's first encode can emit NaN tiles (black
+        // rectangles on screen): the Metal-4 MetalFX path reads uninitialized
+        // internal scratch memory on first use (macOS 26.5). Re-encoding the same
+        // work is reliably clean, so warm every new scaler up with a second pass;
+        // its fence orders the two encodes and the presented result comes from
+        // the clean one.
+        if scalerRebuilt { scaler?.0.encode(commandBuffer: commandBuffer) }
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(
             descriptor: passDescriptor,
